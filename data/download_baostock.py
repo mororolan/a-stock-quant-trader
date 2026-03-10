@@ -239,7 +239,8 @@ def verify_cache(stock_codes: list[str]) -> None:
 
 
 def main():
-    from config import SECTOR_STOCK_POOL, DATA_CONFIG
+    from config import DATA_CONFIG
+    from selector.stock_screener import load_universe, filter_by_theme
 
     parser = argparse.ArgumentParser(
         description="Baostock真实行情数据下载器",
@@ -255,7 +256,7 @@ def main():
     )
     parser.add_argument(
         "--sectors", nargs="+", default=[],
-        help="只下载指定板块（默认下载全部）"
+        help="只下载指定主题/关键词（默认下载宇宙全部）"
     )
     parser.add_argument(
         "--codes", nargs="+", default=[],
@@ -279,22 +280,34 @@ def main():
     if args.codes:
         stock_codes = args.codes
     elif args.sectors:
-        stock_codes = list(dict.fromkeys(
-            code
-            for sector in args.sectors
-            for code in SECTOR_STOCK_POOL.get(sector, [])
-        ))
-        if not stock_codes:
-            print(f"未找到板块，可用板块：{list(SECTOR_STOCK_POOL.keys())}")
+        # 从宇宙文件按主题/关键词筛选
+        universe = load_universe()
+        if not universe:
+            logger.error("宇宙文件不存在或为空，请先运行 python data/download_universe.py")
             sys.exit(1)
+        candidates = filter_by_theme(universe, args.sectors)
+        stock_codes = [s["code"] for s in candidates]
+        if not stock_codes:
+            print(f"主题 {args.sectors} 未匹配到任何股票")
+            print("提示：支持板块名（'AI与科技'）和关键词（'算力' '光伏' '银行'）")
+            sys.exit(1)
+        logger.info(f"主题 {args.sectors} 匹配 {len(stock_codes)} 只股票")
     else:
-        stock_codes = DATA_CONFIG["stock_pool"]
+        # 默认：下载宇宙全部股票
+        universe = load_universe()
+        if universe:
+            stock_codes = [s["code"] for s in universe]
+            logger.info(f"宇宙模式：下载全部 {len(stock_codes)} 只主板股票")
+        else:
+            # fallback到配置的小池子
+            stock_codes = DATA_CONFIG["stock_pool"]
+            logger.warning(f"宇宙文件不存在，使用fallback池：{len(stock_codes)} 只")
 
     if args.verify:
         verify_cache(stock_codes)
         return
 
-    print(f"\n准备下载 {len(stock_codes)} 只股票：{', '.join(stock_codes)}")
+    print(f"\n准备下载 {len(stock_codes)} 只股票：{', '.join(stock_codes[:10])}{'...' if len(stock_codes) > 10 else ''}")
     download_all(stock_codes, args.start, args.end, force=args.force, delay=args.delay)
 
     # 下载完毕后顺便验证
