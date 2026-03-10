@@ -162,14 +162,14 @@ def run_full_backtest():
         plot_backtest_results(
             equity_tech, trade_df_tech, metrics_tech, initial_capital,
             save_path="reports/tech_strategy_report.png",
-            title="A股多因子技术策略 回测报告（2020-2024）",
+            title="A股多因子技术策略 回测报告（2023-2026.02）",
         )
         # ML增强策略图
         if not trade_df_ml.empty:
             plot_backtest_results(
                 equity_ml, trade_df_ml, metrics_ml, initial_capital,
                 save_path="reports/ml_enhanced_report.png",
-                title="A股多因子+ML增强策略 回测报告（2020-2024）",
+                title="A股多因子+ML增强策略 回测报告（2023-2026.02）",
             )
     except Exception as e:
         logger.warning(f"可视化失败: {e}")
@@ -181,7 +181,7 @@ def run_full_backtest():
     print(f"  {'年份':<6} {'期初资金':>10} {'期末资金':>10} {'年度收益':>8} {'年度净利':>10}")
     print("  " + "-" * 50)
     total_start = equity_tech.iloc[0]
-    for yr in range(2020, 2026):
+    for yr in range(2023, 2027):
         yr_eq = equity_tech[equity_tech.index.year == yr]
         if len(yr_eq) == 0:
             continue
