@@ -38,10 +38,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scanner")
 
-from config import SECTOR_STOCK_POOL, STRATEGY_CONFIG, ACCOUNT_CONFIG
+from config import STRATEGY_CONFIG, ACCOUNT_CONFIG
 from strategies.multi_factor import MultiFactorStrategy
 from strategies.indicators import compute_all_indicators
 from data.fetcher import generate_synthetic_data, load_cache
+from selector.stock_screener import screen, load_universe, print_candidates
 
 
 # ────────────── 数据加载 ──────────────
@@ -64,7 +65,7 @@ def load_or_simulate(
     data_dir: str,
     start_date: str,
     end_date: str,
-    warmup_days: int = 280,
+    warmup_days: int = 380,  # 252(52w指标) + 120(MA120) + 8 = 380天才够60行有效数据
 ) -> pd.DataFrame:
     """
     数据加载优先级：
@@ -238,93 +239,92 @@ def print_order_advice(advice: dict, rank: int) -> None:
 
 # ────────────── 主扫描逻辑 ──────────────
 
+def _make_data_loader(data_dir: str, scan_date: str):
+    """返回一个 (code, scan_date) -> DataFrame 的数据加载函数，供选股器技术预过滤使用"""
+    def loader(code: str, date: str) -> pd.DataFrame:
+        return load_or_simulate(code, data_dir, date, date)
+    return loader
+
+
 def run_daily_scan(
-    sectors: list[str],
+    themes: list[str],
     data_dir: str = "",
     scan_date: str = None,
     top_n: int = 3,
 ) -> list[dict]:
     """
-    扫描指定板块，输出今日买入/卖出建议
+    动态选股 + 信号扫描，输出今日买入建议
+
+    流程：
+      1. 选股器从宇宙库按主题/关键词筛出候选（技术预过滤：趋势+流动性）
+      2. 对候选跑精确多因子信号
+      3. 返回信号强度最高的 top_n 只
 
     Parameters
     ----------
-    sectors   : 关注的板块列表（来自LLM或手动指定）
-    data_dir  : 真实行情数据目录（空则使用仿真数据）
+    themes    : 主题/板块列表（来自LLM或手动）
+    data_dir  : 额外数据目录（优先使用 data/cache/）
     scan_date : 扫描日期（默认今天）
-    top_n     : 最多给出多少个买入建议
+    top_n     : 最多输出几个建议
     """
     if scan_date is None:
         scan_date = datetime.today().strftime("%Y-%m-%d")
 
-    end_date = scan_date
-    start_date = (pd.Timestamp(scan_date) - pd.offsets.BDay(30)).strftime("%Y-%m-%d")
+    # ── 1. 动态选股 ──
+    data_loader = _make_data_loader(data_dir, scan_date)
+    candidates = screen(
+        themes=themes,
+        data_loader=data_loader,
+        scan_date=scan_date,
+        max_tier=ACCOUNT_CONFIG.get("max_tier", 2),
+        exclude_boards=ACCOUNT_CONFIG.get("exclude_boards", ["300", "688"]),
+        skip_tech_prefilter=False,
+    )
 
-    # 收集目标股票
-    target_stocks = {}
-    for sector in sectors:
-        if sector not in SECTOR_STOCK_POOL:
-            logger.warning(f"未知板块：{sector}，跳过")
-            continue
-        for code in SECTOR_STOCK_POOL[sector]:
-            target_stocks[code] = sector
+    if not candidates:
+        logger.warning("选股器无候选，尝试跳过技术预过滤重试...")
+        candidates = screen(
+            themes=themes,
+            data_loader=data_loader,
+            scan_date=scan_date,
+            max_tier=ACCOUNT_CONFIG.get("max_tier", 2),
+            exclude_boards=ACCOUNT_CONFIG.get("exclude_boards", ["300", "688"]),
+            skip_tech_prefilter=True,
+        )
 
-    if not target_stocks:
-        print("没有有效的股票，请检查板块名称")
+    if not candidates:
+        logger.warning(f"主题 {themes} 无候选股票")
         return []
 
-    logger.info(f"扫描 {len(target_stocks)} 只股票，日期：{scan_date}")
-    logger.info(f"板块：{', '.join(sectors)}")
+    # 候选名称映射（从宇宙文件直接读）
+    stock_names = {s["code"]: s["name"] for s in candidates}
+    stock_sectors = {s["code"]: s.get("sector", "") for s in candidates}
 
-    # 股票名称映射（从配置中构建）
-    stock_names = {}
-    for sector, stocks in SECTOR_STOCK_POOL.items():
-        for code in stocks:
-            # 简单映射（真实场景从行情数据中读取）
-            stock_names[code] = code
+    logger.info(f"候选 {len(candidates)} 只，开始精确信号扫描...")
 
-    # 真实名称（已知的）
-    known_names = {
-        "600519": "贵州茅台", "000858": "五粮液", "601318": "中国平安",
-        "600036": "招商银行", "000333": "美的集团", "002415": "海康威视",
-        "600276": "恒瑞医药", "601166": "兴业银行", "000568": "泸州老窖",
-        "601888": "中国中免", "002594": "比亚迪", "600900": "长江电力",
-        "601012": "隆基绿能", "000725": "京东方A", "600009": "上海机场",
-        "002714": "牧原股份", "600030": "中信证券", "601668": "中国建筑",
-        "000001": "平安银行", "600031": "三一重工", "600703": "三安光电",
-        "000063": "中兴通讯", "601138": "工业富联", "601688": "华泰证券",
-        "601601": "中国太保", "002304": "洋河股份", "600809": "山西汾酒",
-        "601877": "正泰电器", "600941": "中国移动", "600196": "复星医药",
-        "000538": "云南白药", "600085": "同仁堂", "601088": "中国神华",
-        "600019": "宝钢股份", "600887": "伊利股份", "000895": "双汇发展",
-    }
-    stock_names.update(known_names)
-
+    # ── 2. 精确信号扫描 ──
     strategy = MultiFactorStrategy(STRATEGY_CONFIG)
     buy_candidates = []
 
-    for code, sector in target_stocks.items():
+    for s in candidates:
+        code = s["code"]
         try:
-            df = load_or_simulate(code, data_dir, start_date, end_date)
+            df = load_or_simulate(code, data_dir, scan_date, scan_date)
             if df.empty or len(df) < 60:
-                logger.debug(f"[{code}] 数据不足，跳过")
                 continue
 
             sig_df = strategy.generate_signals(df)
             if sig_df.empty:
                 continue
 
-            # 检查最新一个交易日是否有买入信号
             latest = sig_df.iloc[-1]
-            latest_idx = len(sig_df) - 1
-
             if latest.get("signal", 0) == 1:
-                signal_info = analyze_signal_strength(latest, sig_df, latest_idx)
+                signal_info = analyze_signal_strength(latest, sig_df, len(sig_df) - 1)
                 name = stock_names.get(code, code)
                 advice = generate_order_advice(
                     code, name, latest["close"], signal_info, ACCOUNT_CONFIG
                 )
-                advice["sector"] = sector
+                advice["sector"] = stock_sectors.get(code, "")
                 advice["signal_date"] = sig_df.index[-1].strftime("%Y-%m-%d")
                 buy_candidates.append(advice)
                 logger.info(f"  [{code}] {name} 触发买入信号，强度{signal_info['score']}/5")
@@ -332,9 +332,7 @@ def run_daily_scan(
         except Exception as e:
             logger.debug(f"[{code}] 处理失败: {e}")
 
-    # 按信号强度排序
     buy_candidates.sort(key=lambda x: x["signal_strength"], reverse=True)
-
     return buy_candidates[:top_n]
 
 
@@ -367,39 +365,48 @@ def main():
     args = parser.parse_args()
 
     if args.list_sectors:
-        print("\n可用板块：")
-        for s, codes in SECTOR_STOCK_POOL.items():
-            print(f"  【{s}】: {', '.join(codes)}")
+        from selector.stock_screener import THEME_KEYWORD_MAP
+        print("\n可用主题（关键词）：")
+        for theme, kws in THEME_KEYWORD_MAP.items():
+            print(f"  【{theme}】: {', '.join(kws[:5])}...")
+        print("\n宇宙统计：")
+        universe = load_universe()
+        from collections import Counter
+        cnt = Counter(s.get("sector","其他") for s in universe)
+        for sec, n in sorted(cnt.items(), key=lambda x: -x[1]):
+            print(f"  {sec:<14} {n} 只")
         return
 
     scan_date = args.date or datetime.today().strftime("%Y-%m-%d")
-    sectors = args.sectors
+    themes = args.sectors  # --sectors 参数复用，实际含义是主题/关键词
 
-    # LLM自动选板块
-    if args.news and not sectors:
+    # LLM自动选主题
+    if args.news and not themes:
         from selector.sector_llm import analyze_sectors_with_llm, print_sector_analysis
         try:
             result = analyze_sectors_with_llm(args.news, api_key=args.api_key)
             print_sector_analysis(result, args.news)
-            sectors = result.get("top_sectors", [])
+            themes = result.get("top_sectors", [])
         except Exception as e:
             logger.warning(f"LLM分析失败: {e}，请手动指定 --sectors")
-            sectors = []
+            themes = []
 
-    if not sectors:
-        print("\n请指定 --sectors 或 --news 来选择板块")
-        print("可用板块：", list(SECTOR_STOCK_POOL.keys()))
+    if not themes:
+        print("\n请指定 --sectors（主题/关键词）或 --news 来触发LLM选板块")
+        print("示例：python run_daily_scanner.py --sectors AI与科技 金融")
+        print("      python run_daily_scanner.py --sectors 算力 光伏 银行")
+        print("      python run_daily_scanner.py --list-sectors  # 查看所有主题")
         return
 
     # 扫描信号
     print("\n" + "="*65)
     print(f"  A股每日信号扫描报告")
     print(f"  扫描日期：{scan_date}")
-    print(f"  关注板块：{', '.join(sectors)}")
+    print(f"  关注主题：{', '.join(themes)}")
     print(f"  账户资金：{ACCOUNT_CONFIG['total_capital']/10000:.0f}万元  仓位：{ACCOUNT_CONFIG['position_size']*100:.0f}%/笔")
     print("="*65)
 
-    candidates = run_daily_scan(sectors, args.data_dir, scan_date, args.top)
+    candidates = run_daily_scan(themes, args.data_dir, scan_date, args.top)
 
     if candidates:
         print(f"\n  发现 {len(candidates)} 个买入信号：")
@@ -412,7 +419,7 @@ def main():
         print(f"  · 止盈{STRATEGY_CONFIG['take_profit']*100:.0f}%到达后可全部卖出，不建议持仓超过{STRATEGY_CONFIG['max_hold_days']}个交易日")
         print(f"  · 最大同时持仓 {ACCOUNT_CONFIG['max_positions']} 只，今日若已满仓请忽略新信号")
     else:
-        print(f"\n  今日无买入信号（{', '.join(sectors)}板块暂无满足条件的标的）")
+        print(f"\n  今日无买入信号（{', '.join(themes)}主题暂无满足条件的标的）")
         print(f"  建议：可关注明日是否有回调到位的信号")
 
     print("\n" + "="*65)
