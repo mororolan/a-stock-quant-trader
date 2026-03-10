@@ -71,17 +71,19 @@ class BacktestEngine:
 
     def _shares_to_buy(self, capital: float, price: float) -> int:
         """
-        按固定仓位计算可买股数（100股整数倍）
+        按固定仓位计算可买股数（A股最小交易单位：1手=100股）
 
-        每笔预算 = initial_capital × position_size（固定值，不随持仓盈亏浮动）
-        上限 = 可用现金（不允许超支）
-
-        设计逻辑：15万账户，28%仓位 → 每笔固定约4.2万，
-        最多同时持仓3只 → 约12.6万已投入，预留2.4万缓冲
+        优先级：
+        1. 标准仓位(initial_capital × position_size)内尽量多买，向下取整到100股
+        2. 标准仓位不够一手 → 动用当前可用现金凑满1手(100股)
+        3. 连1手都买不起(price×100 > capital) → 返回0，跳过该信号
         """
         budget = min(capital, self.fixed_position_budget)
         shares = int(budget / price / 100) * 100
-        return max(shares, 0)
+        if shares == 0 and capital >= price * 100:
+            # 高价股：标准仓不够一手，但账上资金能凑满，买最小单位
+            return 100
+        return shares
 
     # ────────────── 单只股票回测 ──────────────
 

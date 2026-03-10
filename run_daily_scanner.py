@@ -162,6 +162,12 @@ def generate_order_advice(
 
     budget = capital * pos_size
     shares_raw = int(budget / current_price / 100) * 100  # 100股整数倍
+    if shares_raw == 0:
+        # 高价股：标准仓不够一手，试用全部可用资金凑100股
+        if current_price * 100 <= capital:
+            shares_raw = 100
+        else:
+            return None  # 连1手都买不起，不生成建议
     actual_cost = shares_raw * current_price
 
     take_profit_price = current_price * (1 + tp_pct)
@@ -324,6 +330,9 @@ def run_daily_scan(
                 advice = generate_order_advice(
                     code, name, latest["close"], signal_info, ACCOUNT_CONFIG
                 )
+                if advice is None:
+                    logger.info(f"  [{code}] {name} 有信号但价格过高（{latest['close']:.1f}元，买1手需{latest['close']*100:.0f}元，超过账户资金），跳过")
+                    continue
                 advice["sector"] = stock_sectors.get(code, "")
                 advice["signal_date"] = sig_df.index[-1].strftime("%Y-%m-%d")
                 buy_candidates.append(advice)
