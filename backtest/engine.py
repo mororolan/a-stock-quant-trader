@@ -34,6 +34,7 @@ class Trade:
     pnl_pct: float = 0.0         # 盈亏百分比
     hold_days: int = 0
     exit_reason: str = ""        # 退出原因
+    trailing_high: float = 0.0   # 追踪止损用：持仓期间最高收盘价
 
     @property
     def is_win(self) -> bool:
@@ -119,28 +120,38 @@ class BacktestEngine:
                 exit_price = None
                 exit_reason = ""
 
-                # 固定止损（以入场价为基准，不使用ATR动态止损，避免实际止损比TP更紧）
-                # 设计逻辑：TP=2%, SL=8% → 随机游走基准胜率 = 8/(8+2) = 80%
+                # 更新追踪最高价
+                if price_close > current_trade.trailing_high:
+                    current_trade.trailing_high = price_close
+
+                # 固定止损（以入场价为基准）
                 stop_price = current_trade.entry_price * (1 - self.st_cfg["stop_loss"])
 
-                # 固定止盈
-                take_profit_price = current_trade.entry_price * (1 + self.st_cfg["take_profit"])
+                # 追踪止损：盈利达到 trail_activation 后激活，从最高价回撤 trail_pct 离场
+                trail_activation = self.st_cfg.get("trail_activation", 0.03)
+                trail_pct = self.st_cfg.get("trail_pct", 0.05)
+                trail_active = current_trade.trailing_high >= current_trade.entry_price * (1 + trail_activation)
+                trail_stop = current_trade.trailing_high * (1 - trail_pct) if trail_active else None
 
-                # 用开盘价检查跳空
+                price_low = row.get("low", price_close)
+                price_high = row.get("high", price_close)
+
+                # 用开盘价检查跳空止损
                 if price_open <= stop_price:
                     exit_price = price_open
                     exit_reason = "stop_loss"
-                elif price_open >= take_profit_price:
+                # 开盘即触发追踪止损
+                elif trail_stop is not None and price_open <= trail_stop:
                     exit_price = price_open
-                    exit_reason = "take_profit"
-                # 日内最低点触发止损
-                elif row.get("low", price_close) <= stop_price:
+                    exit_reason = "trail_stop"
+                # 日内最低点触发固定止损
+                elif price_low <= stop_price:
                     exit_price = stop_price
                     exit_reason = "stop_loss"
-                # 日内最高点触发止盈
-                elif row.get("high", price_close) >= take_profit_price:
-                    exit_price = take_profit_price
-                    exit_reason = "take_profit"
+                # 日内触发追踪止损
+                elif trail_stop is not None and price_low <= trail_stop:
+                    exit_price = trail_stop
+                    exit_reason = "trail_stop"
                 # 策略卖出信号
                 elif row.get("signal", 0) == -1:
                     exit_price = price_close
@@ -168,7 +179,6 @@ class BacktestEngine:
                 if shares > 0:
                     cost = self._buy_cost(price_close, shares)
                     if cost <= capital:
-                        atr_val = row.get("atr", price_close * 0.03)
                         capital -= cost
                         current_trade = Trade(
                             stock_code=stock_code,
@@ -176,6 +186,7 @@ class BacktestEngine:
                             entry_price=price_close,
                             shares=shares,
                             entry_cost=cost,
+                            trailing_high=price_close,
                         )
 
             # ── 计算当日权益 ──
@@ -240,18 +251,28 @@ class BacktestEngine:
                 price_open = row.get("open", row["close"])
                 price_close = row["close"]
 
+                # 更新追踪最高价
+                if price_close > trade.trailing_high:
+                    trade.trailing_high = price_close
+
                 stop_price = trade.entry_price * (1 - self.st_cfg["stop_loss"])
-                take_profit_price = trade.entry_price * (1 + self.st_cfg["take_profit"])
+
+                trail_activation = self.st_cfg.get("trail_activation", 0.03)
+                trail_pct = self.st_cfg.get("trail_pct", 0.05)
+                trail_active = trade.trailing_high >= trade.entry_price * (1 + trail_activation)
+                trail_stop = trade.trailing_high * (1 - trail_pct) if trail_active else None
+
+                price_low = row.get("low", price_close)
 
                 exit_price, exit_reason = None, ""
                 if price_open <= stop_price:
                     exit_price, exit_reason = price_open, "stop_loss"
-                elif price_open >= take_profit_price:
-                    exit_price, exit_reason = price_open, "take_profit"
-                elif row.get("low", price_close) <= stop_price:
+                elif trail_stop is not None and price_open <= trail_stop:
+                    exit_price, exit_reason = price_open, "trail_stop"
+                elif price_low <= stop_price:
                     exit_price, exit_reason = stop_price, "stop_loss"
-                elif row.get("high", price_close) >= take_profit_price:
-                    exit_price, exit_reason = take_profit_price, "take_profit"
+                elif trail_stop is not None and price_low <= trail_stop:
+                    exit_price, exit_reason = trail_stop, "trail_stop"
                 elif row.get("signal", 0) == -1:
                     exit_price, exit_reason = price_close, "signal_exit"
                 elif trade.hold_days >= self.st_cfg["max_hold_days"]:
@@ -313,6 +334,7 @@ class BacktestEngine:
                         entry_price=price_close,
                         shares=shares,
                         entry_cost=cost,
+                        trailing_high=price_close,
                     )
 
             # ── 计算当日权益 ──

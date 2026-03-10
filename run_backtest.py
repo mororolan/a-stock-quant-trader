@@ -197,7 +197,7 @@ def run_full_backtest():
     print(f"  {'合计':<6} {total_start:>10,.0f} {equity_tech.iloc[-1]:>10,.0f} {total_ret:>+7.1f}%  ¥{total_pnl:>+9,.0f}")
     print(f"\n  资金约束说明：初始15万，单笔固定仓位≈4.2万，最多同时持仓3只（≈12.6万）")
     print(f"  每笔亏损上限：-{STRATEGY_CONFIG['stop_loss']*100:.0f}%（≈¥{initial_capital*BACKTEST_CONFIG['position_size']*STRATEGY_CONFIG['stop_loss']:,.0f}），"
-          f"止盈目标：+{STRATEGY_CONFIG['take_profit']*100:.0f}%（≈¥{initial_capital*BACKTEST_CONFIG['position_size']*STRATEGY_CONFIG['take_profit']:,.0f}）")
+          f"追踪止损：激活+{STRATEGY_CONFIG.get('trail_activation',0.03)*100:.0f}%，回撤{STRATEGY_CONFIG.get('trail_pct',0.05)*100:.0f}%离场")
 
     # ── 11. 最终评级 ──
     print("\n" + "=" * 65)
@@ -205,11 +205,11 @@ def run_full_backtest():
     print("=" * 65)
     m = metrics_tech
     criteria = [
-        ("胜率",       overall_wr,                    80,   "%",  "≥80%"),
-        ("年化收益",   m.get("annual_return_pct", 0),  8,   "%",  "≥8%"),
-        ("最大回撤",   m.get("max_drawdown_pct", 0),  15,   "%",  "≤15%", True),
-        ("盈亏比",     m.get("profit_loss_ratio", 0),  0.3, "",   "≥0.3（TP/SL=3%/8%）"),
-        ("夏普比率",   m.get("sharpe_ratio", 0),       0.8, "",   "≥0.8"),
+        ("年化收益",   m.get("annual_return_pct", 0),  10,  "%",  "≥10%"),
+        ("最大回撤",   m.get("max_drawdown_pct", 0),   15,  "%",  "≤15%", True),
+        ("盈亏比",     m.get("profit_loss_ratio", 0),  1.5, "",   "≥1.5（追踪止损模式）"),
+        ("夏普比率",   m.get("sharpe_ratio", 0),        1.0, "",   "≥1.0"),
+        ("月度胜率",   m.get("monthly_win_rate_pct", 0),  60,  "%",  "≥60%（月度）"),
     ]
     passed_cnt = 0
     for row in criteria:

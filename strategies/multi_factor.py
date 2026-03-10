@@ -93,6 +93,13 @@ class MultiFactorStrategy:
         not_overbought_entry = df["rsi"] < 65       # RSI未超买
         not_near_boll_upper = df["boll_pb"] < 0.80  # 不在布林上轨附近
 
+        # ════════════ 体制过滤：熊市不开仓 ════════════
+        # 牛市条件：MA60 向上 + 价格在 MA120 之上
+        # 避免在趋势向下的熊市中反复试错（熊市胜率仅60% vs 牛市86%）
+        ma120_slope = df["ma_trend"] > df["ma_trend"].shift(20)
+        price_above_ma120 = df["close"] > df["ma_trend"]
+        bull_regime = ma60_slope & (price_above_ma120 | ma120_slope)
+
         # ════════════ 综合买入信号 ════════════
         buy_candidate = (
             trend_up &
@@ -101,7 +108,8 @@ class MultiFactorStrategy:
             rebound_ok &
             volume_confirm &
             not_overbought_entry &
-            not_near_boll_upper
+            not_near_boll_upper &
+            bull_regime
         )
 
         # ════════════ 卖出条件 ════════════
