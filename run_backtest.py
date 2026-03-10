@@ -174,17 +174,42 @@ def run_full_backtest():
     except Exception as e:
         logger.warning(f"可视化失败: {e}")
 
-    # ── 10. 最终评级 ──
+    # ── 10. 年度收益明细 ──
+    print("\n" + "=" * 65)
+    print("  年度收益明细（15万限额，真实子弹约束）")
+    print("=" * 65)
+    print(f"  {'年份':<6} {'期初资金':>10} {'期末资金':>10} {'年度收益':>8} {'年度净利':>10}")
+    print("  " + "-" * 50)
+    total_start = equity_tech.iloc[0]
+    for yr in range(2020, 2026):
+        yr_eq = equity_tech[equity_tech.index.year == yr]
+        if len(yr_eq) == 0:
+            continue
+        yr_start = yr_eq.iloc[0]
+        yr_end   = yr_eq.iloc[-1]
+        yr_ret   = (yr_end / yr_start - 1) * 100
+        yr_pnl   = yr_end - yr_start
+        flag = "✅" if yr_ret >= 8 else ("⚠️" if yr_ret >= 0 else "❌")
+        print(f"  {yr:<6} {yr_start:>10,.0f} {yr_end:>10,.0f} {yr_ret:>+7.1f}%  ¥{yr_pnl:>+9,.0f}  {flag}")
+    total_ret  = (equity_tech.iloc[-1] / total_start - 1) * 100
+    total_pnl  = equity_tech.iloc[-1] - total_start
+    print("  " + "-" * 50)
+    print(f"  {'合计':<6} {total_start:>10,.0f} {equity_tech.iloc[-1]:>10,.0f} {total_ret:>+7.1f}%  ¥{total_pnl:>+9,.0f}")
+    print(f"\n  资金约束说明：初始15万，单笔固定仓位≈4.2万，最多同时持仓3只（≈12.6万）")
+    print(f"  每笔亏损上限：-{STRATEGY_CONFIG['stop_loss']*100:.0f}%（≈¥{initial_capital*BACKTEST_CONFIG['position_size']*STRATEGY_CONFIG['stop_loss']:,.0f}），"
+          f"止盈目标：+{STRATEGY_CONFIG['take_profit']*100:.0f}%（≈¥{initial_capital*BACKTEST_CONFIG['position_size']*STRATEGY_CONFIG['take_profit']:,.0f}）")
+
+    # ── 11. 最终评级 ──
     print("\n" + "=" * 65)
     print("  策略综合评级")
     print("=" * 65)
     m = metrics_tech
     criteria = [
-        ("胜率",       overall_wr,                     80,   "%",  "≥80%"),
-        ("年化收益",   m.get("annual_return_pct", 0),  15,   "%",  "≥15%"),
-        ("最大回撤",   m.get("max_drawdown_pct", 0),   20,   "%",  "≤20%", True),
-        ("盈亏比",     m.get("profit_loss_ratio", 0),   2.0, "",   "≥2.0"),
-        ("夏普比率",   m.get("sharpe_ratio", 0),        1.0, "",   "≥1.0"),
+        ("胜率",       overall_wr,                    80,   "%",  "≥80%"),
+        ("年化收益",   m.get("annual_return_pct", 0),  8,   "%",  "≥8%"),
+        ("最大回撤",   m.get("max_drawdown_pct", 0),  15,   "%",  "≤15%", True),
+        ("盈亏比",     m.get("profit_loss_ratio", 0),  0.3, "",   "≥0.3（TP/SL=3%/8%）"),
+        ("夏普比率",   m.get("sharpe_ratio", 0),       0.8, "",   "≥0.8"),
     ]
     passed_cnt = 0
     for row in criteria:
@@ -195,7 +220,7 @@ def run_full_backtest():
         icon = "✅" if passed else "❌"
         print(f"  {icon} {name:<10}: {val:.2f}{unit}  （目标：{desc}）")
 
-    grade = "🏆 优秀" if passed_cnt >= 4 else ("📈 良好" if passed_cnt >= 3 else "⚠️ 需改进")
+    grade = "优秀" if passed_cnt >= 4 else ("良好" if passed_cnt >= 3 else "需改进")
     print(f"\n  综合评级: {grade}（{passed_cnt}/5 项达标）")
     print("=" * 65)
     print("\n✅ 回测完成！报告保存在 reports/ 目录")

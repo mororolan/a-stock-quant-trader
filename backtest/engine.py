@@ -48,6 +48,8 @@ class BacktestEngine:
     def __init__(self, bt_cfg: dict, strategy_cfg: dict):
         self.bt_cfg = bt_cfg
         self.st_cfg = strategy_cfg
+        # 固定单笔预算 = 初始资金 × position_size（不随盈亏浮动，保证每笔入场金额一致）
+        self.fixed_position_budget = bt_cfg["initial_capital"] * bt_cfg["position_size"]
 
     # ────────────── 成本计算 ──────────────
 
@@ -67,8 +69,16 @@ class BacktestEngine:
         return amount - commission - stamp_duty - slippage
 
     def _shares_to_buy(self, capital: float, price: float) -> int:
-        """按仓位比例计算可买股数（100股整数倍）"""
-        budget = capital * self.bt_cfg["position_size"]
+        """
+        按固定仓位计算可买股数（100股整数倍）
+
+        每笔预算 = initial_capital × position_size（固定值，不随持仓盈亏浮动）
+        上限 = 可用现金（不允许超支）
+
+        设计逻辑：15万账户，28%仓位 → 每笔固定约4.2万，
+        最多同时持仓3只 → 约12.6万已投入，预留2.4万缓冲
+        """
+        budget = min(capital, self.fixed_position_budget)
         shares = int(budget / price / 100) * 100
         return max(shares, 0)
 
@@ -286,7 +296,7 @@ class BacktestEngine:
                     if len(positions) >= max_pos:
                         break
                     price_close = row["close"]
-                    shares = self._shares_to_buy(capital, price_close)  # 用全部可用资金按position_size比例计算
+                    shares = self._shares_to_buy(capital, price_close)  # 固定仓位：min(可用现金, initial_capital×position_size)
                     if shares <= 0:
                         continue
                     cost = self._buy_cost(price_close, shares)

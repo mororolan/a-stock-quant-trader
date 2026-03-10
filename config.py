@@ -81,13 +81,15 @@ STRATEGY_CONFIG = {
 }
 
 # ────────────── 回测配置 ──────────────
+# initial_capital 与 ACCOUNT_CONFIG["total_capital"] 保持一致（15万），
+# 确保回测反映真实资金约束（有限子弹）
 BACKTEST_CONFIG = {
-    "initial_capital": 1_000_000,  # 初始资金 100万
+    "initial_capital": 150_000,    # 初始资金 15万（与ACCOUNT_CONFIG一致）
     "commission": 0.0003,          # 手续费 万三
     "slippage": 0.001,             # 滑点 0.1%
     "stamp_duty": 0.001,           # 印花税 千一（卖出收取）
-    "position_size": 0.28,         # 每次仓位 28%（集中持仓3只≈84%满仓）
-    "max_positions": 3,            # 最大同时持仓数（精选强势股）
+    "position_size": 0.28,         # 每次仓位 28%（≈4.2万/笔，固定额不随盈亏浮动）
+    "max_positions": 3,            # 最大同时持仓数（3×4.2万≈12.6万，保留2.4万缓冲）
 }
 
 # ────────────── ML配置 ──────────────
