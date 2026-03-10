@@ -283,12 +283,16 @@ class BacktestEngine:
                         continue
                     row = df.loc[date]
                     if row.get("signal", 0) == 1:
-                        # 综合评分：ADX趋势强度 + 买入评分 + RSI动量
-                        adx_score = row.get("adx", 20) / 40          # 归一化ADX
-                        buy_score = row.get("buy_score", 3) / 5      # 归一化买入评分
-                        rsi_score = (70 - abs(row.get("rsi", 55) - 55)) / 70  # RSI接近55最佳
-                        ml_proba = row.get("ml_proba", 0.5)
-                        composite = adx_score * 0.3 + buy_score * 0.3 + rsi_score * 0.2 + ml_proba * 0.2
+                        # 综合评分：优先选同日多信号中最强的
+                        # adx         - 趋势强度（列名实际存在）
+                        # ma_bull_score - MA多头排列得分（列名实际存在，取代原buy_score）
+                        # rsi         - RSI动量（接近55最优，过高过低均差）
+                        # ml_proba    - ML过滤概率（ML模式下存在；纯技术模式=0.5）
+                        adx_score  = row.get("adx", 20) / 40
+                        bull_score = row.get("ma_bull_score", 2) / 4   # ma_bull_score 0-4
+                        rsi_score  = (70 - abs(row.get("rsi", 55) - 55)) / 70
+                        ml_proba   = row.get("ml_proba", 0.5)
+                        composite  = adx_score * 0.3 + bull_score * 0.3 + rsi_score * 0.2 + ml_proba * 0.2
                         candidates.append((composite, code, row))
 
                 candidates.sort(reverse=True)

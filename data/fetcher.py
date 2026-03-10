@@ -127,11 +127,14 @@ def fetch_stock_pool(
     return result
 
 
+_SYNTH_CACHE: dict = {}   # 全局缓存，避免重复生成同一股票数据
+
 def generate_synthetic_data(
     stock_code: str = "000001",
     start_date: str = "2020-01-01",
     end_date: str = "2024-12-31",
     seed: int = 42,
+    _base_start: str = "2015-01-01",   # 固定基础起点，保证任意end_date下2020-2025数据一致
 ) -> pd.DataFrame:
     """
     生成仿真A股数据（体制转换 + 动量模型）
@@ -148,93 +151,88 @@ def generate_synthetic_data(
     θ = 2μ/σ² = 2*0.001/0.015² ≈ 8.89
     P(先涨4%再跌10%) = (1-e^(-θ*0.10))/(1-e^(-θ*0.14)) ≈ 83%
     """
+    # ── 缓存检查（固定基础区间，保证任意end_date下历史段数据一致）──
+    cache_key = (stock_code, seed, _base_start)
+    if cache_key not in _SYNTH_CACHE:
+        _SYNTH_CACHE[cache_key] = _generate_synthetic_full(
+            stock_code, _base_start, seed
+        )
+    df_full = _SYNTH_CACHE[cache_key]
+    # 从全量数据切片
+    result = df_full.loc[start_date:end_date]
+    if not result.empty:
+        return result.copy()
+    # fallback：start_date 早于 base_start 时，直接生成（不缓存）
+    return _generate_synthetic_full(stock_code, start_date, seed, end_date=end_date)
+
+
+def _generate_synthetic_full(
+    stock_code: str,
+    base_start: str,
+    seed: int,
+    end_date: str = "2030-12-31",
+) -> pd.DataFrame:
+    """
+    实际生成仿真数据的内部函数。
+    始终从 base_start 开始，确保同一 seed 在不同调用间数据路径一致。
+    """
     rng = np.random.default_rng(seed + sum(ord(c) for c in stock_code) % 997)
 
-    dates = pd.bdate_range(start=start_date, end=end_date, freq="B")
+    dates = pd.bdate_range(start=base_start, end=end_date, freq="B")
     n = len(dates)
 
     # ── 体制切换（马尔可夫链）──
-    # 牛市参数
-    bull_mu = 0.0010    # 0.10%/日 → ~25% 年化
-    bull_sigma = 0.014  # 1.4%/日 → ~22% 年化波动
-    # 熊市参数
-    bear_mu = -0.0005   # -0.05%/日 → ~-12% 年化
-    bear_sigma = 0.018  # 1.8%/日 → ~28% 年化波动
+    bull_mu, bull_sigma = 0.0010, 0.014
+    bear_mu, bear_sigma = -0.0005, 0.018
+    p_bull_to_bear = 1 / 120
+    p_bear_to_bull = 1 / 40
 
-    # 体制转换概率（每日）
-    p_bull_to_bear = 1 / 120  # 牛市平均持续120日（约6个月）
-    p_bear_to_bull = 1 / 40   # 熊市平均持续40日（约2个月）
-
-    regimes = np.zeros(n, dtype=int)  # 0=熊, 1=牛
-    regimes[0] = 1  # 初始为牛市
+    regimes = np.zeros(n, dtype=int)
+    regimes[0] = 1
     for i in range(1, n):
         if regimes[i - 1] == 1:
             regimes[i] = 0 if rng.random() < p_bull_to_bear else 1
         else:
             regimes[i] = 1 if rng.random() < p_bear_to_bull else 0
 
-    # ── 生成收益率（含动量 + 跳扩散）──
+    # ── 收益率（动量 + 跳扩散）──
     z = rng.standard_normal(n)
     momentum = np.zeros(n)
-
-    # 动量因子（AR(1)）
-    # A股特性：散户主导，追涨杀跌强，序列相关更高
-    rho = 0.28  # 序列相关系数（强动量，模拟A股跟风特性）
+    rho = 0.28
     for i in range(1, n):
         momentum[i] = rho * momentum[i - 1] + np.sqrt(1 - rho ** 2) * z[i]
 
-    # 跳扩散事件（2%概率发生）
-    jump_prob = 0.02
-    jump_mean_bull = 0.015   # 牛市跳扩：正跳为主
-    jump_mean_bear = -0.015  # 熊市跳扩：负跳为主
-    jump_std = 0.025
-
     jumps = np.where(
-        rng.random(n) < jump_prob,
+        rng.random(n) < 0.02,
         np.where(regimes == 1,
-                 rng.normal(jump_mean_bull, jump_std, n),
-                 rng.normal(jump_mean_bear, jump_std, n)),
+                 rng.normal(0.015, 0.025, n),
+                 rng.normal(-0.015, 0.025, n)),
         0,
     )
 
-    # 综合收益率
     mu_t = np.where(regimes == 1, bull_mu, bear_mu)
     sigma_t = np.where(regimes == 1, bull_sigma, bear_sigma)
-    log_returns = mu_t + sigma_t * momentum + jumps
-
-    # 涨跌停限制（±10%）
-    log_returns = np.clip(log_returns, -0.10, 0.10)
-
-    # 计算价格序列（初始价50元）
+    log_returns = np.clip(mu_t + sigma_t * momentum + jumps, -0.10, 0.10)
     close = 50 * np.exp(np.cumsum(log_returns))
 
-    # ── 生成 OHLV ──
-    daily_vol_pct = sigma_t + 0.005  # 当日振幅
-    high_factor = 1 + daily_vol_pct * rng.beta(2, 5, n)  # 上影线分布
-    low_factor = 1 - daily_vol_pct * rng.beta(2, 5, n)   # 下影线分布
-    high = close * high_factor
-    low = close * low_factor
+    # ── OHLV ──
+    daily_vol_pct = sigma_t + 0.005
+    high = close * (1 + daily_vol_pct * rng.beta(2, 5, n))
+    low  = close * (1 - daily_vol_pct * rng.beta(2, 5, n))
     open_ = close.copy()
-    open_[1:] = close[:-1] * (1 + rng.normal(0, 0.004, n - 1))  # 开盘价贴近前收
+    open_[1:] = close[:-1] * (1 + rng.normal(0, 0.004, n - 1))
 
-    # ── 成交量（牛市放量，熊市缩量）──
-    base_vol = 5_000_000
     regime_vol_factor = np.where(regimes == 1, 1.4, 0.8)
-    price_chg_factor = 1 + 3 * np.abs(log_returns)  # 大涨大跌放量
-    volume = (base_vol * regime_vol_factor * price_chg_factor *
+    volume = (5_000_000 * regime_vol_factor * (1 + 3 * np.abs(log_returns)) *
               rng.lognormal(0, 0.3, n)).astype(int)
 
     df = pd.DataFrame({
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
+        "open": open_, "high": high, "low": low, "close": close,
         "volume": volume,
         "amount": volume * close,
         "turnover": volume / 1e8 * 100,
         "pct_chg": pd.Series(close).pct_change().fillna(0).values * 100,
-        "regime": regimes,  # 0=熊, 1=牛（仅用于验证，实际不使用）
+        "regime": regimes,
     }, index=dates)
-
     df.index.name = "date"
     return df.round(4)
