@@ -6,8 +6,8 @@
 # 回测用的默认股票（从宇宙文件动态加载，此处为fallback小池）
 DATA_CONFIG = {
     "cache_dir": "data/cache",
-    "start_date": "2023-01-01",
-    "end_date":   "2026-02-28",
+    "start_date": "2025-01-01",   # 用去年真实数据验证
+    "end_date":   "2025-12-31",
     # fallback：无宇宙文件时使用的最小股票池（各板块代表）
     "stock_pool": [
         "600519","000858","000568",              # 消费白酒

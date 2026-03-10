@@ -42,7 +42,7 @@ from config import STRATEGY_CONFIG, ACCOUNT_CONFIG
 from strategies.multi_factor import MultiFactorStrategy
 from strategies.indicators import compute_all_indicators
 from data.fetcher import generate_synthetic_data, load_cache
-from selector.stock_screener import screen, load_universe, print_candidates
+from selector.stock_screener import screen, load_universe, print_candidates, filter_weak_sectors
 
 
 # ────────────── 数据加载 ──────────────
@@ -302,11 +302,22 @@ def run_daily_scan(
         logger.warning(f"主题 {themes} 无候选股票")
         return []
 
+    # ── 1.5 板块强弱过滤（剔除近20日弱势板块，避免在银行弱势期买银行）──
+    candidate_data: dict = {}
+    for s in candidates:
+        df = load_or_simulate(s["code"], data_dir, scan_date, scan_date)
+        if not df.empty:
+            candidate_data[s["code"]] = df
+    candidates = filter_weak_sectors(candidates, candidate_data, lookback=20)
+    if not candidates:
+        logger.warning("板块强弱过滤后无候选股票")
+        return []
+
     # 候选名称映射（从宇宙文件直接读）
     stock_names = {s["code"]: s["name"] for s in candidates}
     stock_sectors = {s["code"]: s.get("sector", "") for s in candidates}
 
-    logger.info(f"候选 {len(candidates)} 只，开始精确信号扫描...")
+    logger.info(f"候选 {len(candidates)} 只（板块过滤后），开始精确信号扫描...")
 
     # ── 2. 精确信号扫描 ──
     strategy = MultiFactorStrategy(STRATEGY_CONFIG)

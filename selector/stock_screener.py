@@ -112,6 +112,76 @@ def apply_basic_filters(
     return result
 
 
+def filter_weak_sectors(
+    stocks: list[dict],
+    stock_data: dict,
+    lookback: int = 20,
+    lag_vs_market: float = -0.03,
+) -> list[dict]:
+    """
+    板块强弱过滤：剔除近期动量弱势的板块
+
+    逻辑：
+    - 用每只股票近 lookback 交易日的涨跌幅，按板块取均值
+    - 与全市场板块收益中位数比较；低于市场 lag_vs_market 的板块视为弱势
+    - 弱势板块内的股票全部剔除
+
+    Parameters
+    ----------
+    stocks     : 候选股票列表（需含 sector 字段）
+    stock_data : {code: DataFrame}，DataFrame 需含 close 列
+    lookback   : 动量计算窗口（交易日，默认20日 ≈ 1个月）
+    lag_vs_market : 相对市场的最大容忍差值（默认 -3%，即允许落后市场不超过3%）
+    """
+    if not stock_data:
+        return stocks
+
+    # 每只股票近 lookback 日累计涨跌幅
+    code_returns: dict[str, float] = {}
+    for code, df in stock_data.items():
+        if "close" not in df.columns or len(df) < lookback + 1:
+            continue
+        tail = df["close"].iloc[-(lookback + 1):]
+        code_returns[code] = float(tail.iloc[-1] / tail.iloc[0]) - 1
+
+    if not code_returns:
+        return stocks
+
+    # 按板块聚合
+    sector_map = {s["code"]: s.get("sector", "") for s in stocks}
+    sector_rets: dict[str, list] = {}
+    for code, ret in code_returns.items():
+        sec = sector_map.get(code, "")
+        if sec:
+            sector_rets.setdefault(sec, []).append(ret)
+
+    if not sector_rets:
+        return stocks
+
+    sector_avg = {sec: float(np.mean(rets)) for sec, rets in sector_rets.items()}
+    market_median = float(np.median(list(sector_avg.values())))
+
+    weak_sectors = {
+        sec for sec, avg in sector_avg.items()
+        if avg - market_median < lag_vs_market
+    }
+
+    if weak_sectors:
+        logger.info(
+            f"板块强弱过滤（近{lookback}日，市场中位数{market_median*100:+.1f}%）："
+            f"弱势板块 {sorted(weak_sectors)}"
+        )
+        for sec, avg in sorted(sector_avg.items(), key=lambda x: -x[1]):
+            flag = "❌弱" if sec in weak_sectors else "✅"
+            logger.debug(f"  {flag} {sec}: {avg*100:+.1f}%  vs 市场 {market_median*100:+.1f}%")
+
+    before = len(stocks)
+    result = [s for s in stocks if s.get("sector", "") not in weak_sectors]
+    if before != len(result):
+        logger.info(f"板块过滤：{before} → {len(result)} 只（剔除 {before - len(result)} 只）")
+    return result
+
+
 def apply_technical_prefilter(
     stocks: list[dict],
     data_loader,

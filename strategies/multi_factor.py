@@ -55,7 +55,7 @@ class MultiFactorStrategy:
         df = df.dropna().copy()
 
         if len(df) < 60:
-            return df
+            return pd.DataFrame()
 
         # ════════════ 条件 A：大趋势确认 ════════════
         trend_up = df["close"] > df["ma_slow"]           # 价格 > MA60（中期牛市）

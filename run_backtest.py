@@ -25,7 +25,72 @@ from strategies.ml_filter import MLSignalFilter, build_features, build_labels
 from backtest.engine import BacktestEngine
 from backtest.metrics import compute_metrics, print_metrics_report
 from backtest.visualizer import plot_backtest_results
-from selector.stock_screener import load_universe, filter_by_theme, apply_basic_filters
+from selector.stock_screener import load_universe, filter_by_theme, apply_basic_filters, filter_weak_sectors
+
+
+def _apply_sector_momentum_filter(
+    signals_dict: dict,
+    sector_map: dict,
+    lookback: int = 20,
+    lag_vs_market: float = -0.03,
+) -> dict:
+    """
+    信号级板块强弱过滤（在回测引擎外做，不改引擎逻辑）
+
+    在每个 t 日：
+    1. 计算各板块近 lookback 日累计涨跌幅（用该板块内所有股票的 close 均值代理指数）
+    2. 板块收益低于全市场板块中位数 lag_vs_market 的，视为弱势
+    3. 弱势板块股票在该日的 signal=1 全部清零（不开仓）
+    """
+    # 构造板块 → codes 映射（只处理 signals_dict 里有数据的）
+    sector_codes: dict[str, list] = {}
+    for code in signals_dict:
+        sec = sector_map.get(code, "")
+        if sec:
+            sector_codes.setdefault(sec, []).append(code)
+
+    if not sector_codes:
+        logger.info("板块映射为空，跳过板块强弱过滤")
+        return signals_dict
+
+    # 对齐全量时间轴
+    all_dates = sorted(set().union(*[set(df.index) for df in signals_dict.values()]))
+
+    # 各板块"代理收盘价"：该板块所有股票 close 的横截面均值
+    sector_proxy: dict[str, pd.Series] = {}
+    for sec, codes in sector_codes.items():
+        closes = [signals_dict[c]["close"] for c in codes if c in signals_dict]
+        if closes:
+            sector_proxy[sec] = pd.concat(closes, axis=1).mean(axis=1).sort_index()
+
+    if not sector_proxy:
+        return signals_dict
+
+    proxy_df = pd.DataFrame(sector_proxy).reindex(all_dates)
+
+    # rolling 收益率：以每日为基准往前看 lookback 日
+    rolling_ret = proxy_df.pct_change(lookback)           # shape (T, n_sectors)
+    market_median = rolling_ret.median(axis=1)            # 每日市场板块中位数
+
+    # 弱势板块 mask：True = 该板块当日弱势
+    weak_mask = rolling_ret.sub(market_median, axis=0) < lag_vs_market   # (T, n_sectors)
+
+    # 统计总抑制量
+    suppressed = 0
+    new_signals = {}
+    for code, sig_df in signals_dict.items():
+        sec = sector_map.get(code, "")
+        if sec not in weak_mask.columns:
+            new_signals[code] = sig_df
+            continue
+        sig_df = sig_df.copy()
+        sec_weak = weak_mask[sec].reindex(sig_df.index, fill_value=False)
+        suppressed += int(((sig_df["signal"] == 1) & sec_weak).sum())
+        sig_df.loc[sec_weak, "signal"] = 0
+        new_signals[code] = sig_df
+
+    logger.info(f"板块动量过滤（近{lookback}日）：抑制买入信号 {suppressed} 个（弱势板块期间不开仓）")
+    return new_signals
 
 
 def _save_backtest_run(
@@ -106,36 +171,51 @@ def run_full_backtest(sectors: list = None):
         stock_codes = DATA_CONFIG["stock_pool"]
         logger.info(f"宇宙文件不存在，使用 config 小池（{len(stock_codes)} 只）")
 
+    # 指标预热：MA120/52周分位等指标需要约252个交易日，
+    # 多加载1年历史数据用于预热，回测信号截取自 start 起
+    warmup_start = (pd.Timestamp(start) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+
     real_count = 0
     stock_data = {}
     for i, code in enumerate(stock_codes):
-        df = load_cache(code, start, end)
-        if not df.empty and len(df) >= 60:
+        df = load_cache(code, warmup_start, end)
+        if not df.empty and len(df) >= 252:
             stock_data[code] = df
             real_count += 1
         else:
-            stock_data[code] = generate_synthetic_data(code, start, end, seed=42 + i * 7)
+            stock_data[code] = generate_synthetic_data(code, warmup_start, end, seed=42 + i * 7)
     src = f"（{real_count}只真实数据 + {len(stock_data)-real_count}只仿真数据）" if real_count else "（仿真数据）"
-    logger.info(f"数据准备完成：{len(stock_data)} 只股票，每只约 {len(list(stock_data.values())[0])} 个交易日 {src}")
+    logger.info(
+        f"数据准备完成：{len(stock_data)} 只股票，每只约 {len(list(stock_data.values())[0])} 个交易日（含预热期） {src}"
+    )
 
-    # ── 2. 技术面信号生成 ──
+    # ── 2. 技术面信号生成（含预热期，确保指标充分预热）──
     logger.info("计算多因子技术信号...")
     signals_dict = {}
     total_signals = 0
     for code, df in stock_data.items():
         sig_df = strategy.generate_signals(df)
-        if not sig_df.empty:
-            signals_dict[code] = sig_df
-            cnt = (sig_df["signal"] == 1).sum()
-            total_signals += cnt
-    logger.info(f"技术信号汇总：{len(signals_dict)} 只股票，共 {total_signals} 个买入点")
+        if sig_df.empty:
+            continue
+        # 截取回测区间（舍弃预热期，指标已充分预热）
+        sig_df = sig_df.loc[start:]
+        if sig_df.empty:
+            continue
+        signals_dict[code] = sig_df
+        total_signals += int((sig_df["signal"] == 1).sum())
+    logger.info(f"技术信号汇总（{start}起）：{len(signals_dict)} 只股票，共 {total_signals} 个买入点")
+
+    # ── 2.5 板块动量过滤（弱势板块期间不开仓）──
+    _sector_map = {s["code"]: s.get("sector", "") for s in candidates} if universe else {}
+    signals_dict = _apply_sector_momentum_filter(signals_dict, _sector_map)
 
     # ── 3. 纯技术策略回测 ──
     logger.info("=" * 50)
     logger.info("运行【纯技术面策略】回测...")
     trades_tech, equity_tech, trade_df_tech = bt_engine.run_portfolio(signals_dict)
     metrics_tech = compute_metrics(trade_df_tech, equity_tech, initial_capital)
-    print_metrics_report(metrics_tech, "【纯技术面策略】组合回测结果（2020-2024）")
+    yr_range = f"{DATA_CONFIG['start_date'][:4]}–{DATA_CONFIG['end_date'][:4]}"
+    print_metrics_report(metrics_tech, f"【纯技术面策略】组合回测结果（{yr_range}）")
 
     # ── 4. ML过滤器训练 ──
     logger.info("=" * 50)
@@ -246,14 +326,14 @@ def run_full_backtest(sectors: list = None):
         plot_backtest_results(
             equity_tech, trade_df_tech, metrics_tech, initial_capital,
             save_path="reports/tech_strategy_report.png",
-            title="A股多因子技术策略 回测报告（2023-2026.02）",
+            title=f"A股多因子技术策略 回测报告（{yr_range}）",
         )
         # ML增强策略图
         if not trade_df_ml.empty:
             plot_backtest_results(
                 equity_ml, trade_df_ml, metrics_ml, initial_capital,
                 save_path="reports/ml_enhanced_report.png",
-                title="A股多因子+ML增强策略 回测报告（2023-2026.02）",
+                title=f"A股多因子+ML增强策略 回测报告（{yr_range}）",
             )
     except Exception as e:
         logger.warning(f"可视化失败: {e}")
@@ -265,7 +345,9 @@ def run_full_backtest(sectors: list = None):
     print(f"  {'年份':<6} {'期初资金':>10} {'期末资金':>10} {'年度收益':>8} {'年度净利':>10}")
     print("  " + "-" * 50)
     total_start = equity_tech.iloc[0]
-    for yr in range(2023, 2027):
+    yr_start_cfg = int(DATA_CONFIG["start_date"][:4])
+    yr_end_cfg = int(DATA_CONFIG["end_date"][:4])
+    for yr in range(yr_start_cfg, yr_end_cfg + 1):
         yr_eq = equity_tech[equity_tech.index.year == yr]
         if len(yr_eq) == 0:
             continue
