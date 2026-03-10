@@ -86,6 +86,9 @@ class MultiFactorStrategy:
         # ════════════ 条件 D：量能确认 ════════════
         volume_confirm = df["vol_ratio"] >= 0.9  # 成交量不低于均量的90%
 
+        # ════════════ 条件 E：20日价格动量为正（近期确实在涨） ════════════
+        momentum_20d = df["close"] > df["close"].shift(20)  # 20日内价格上涨
+
         # ════════════ 额外过滤：不在过热位置买入 ════════════
         not_overbought_entry = df["rsi"] < 65       # RSI未超买
         not_near_boll_upper = df["boll_pb"] < 0.80  # 不在布林上轨附近

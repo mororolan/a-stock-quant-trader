@@ -127,8 +127,8 @@ def generate_synthetic_data(
     bear_sigma = 0.018  # 1.8%/日 → ~28% 年化波动
 
     # 体制转换概率（每日）
-    p_bull_to_bear = 1 / 100  # 牛市平均持续100日
-    p_bear_to_bull = 1 / 50   # 熊市平均持续50日
+    p_bull_to_bear = 1 / 120  # 牛市平均持续120日（约6个月）
+    p_bear_to_bull = 1 / 40   # 熊市平均持续40日（约2个月）
 
     regimes = np.zeros(n, dtype=int)  # 0=熊, 1=牛
     regimes[0] = 1  # 初始为牛市
@@ -143,7 +143,8 @@ def generate_synthetic_data(
     momentum = np.zeros(n)
 
     # 动量因子（AR(1)）
-    rho = 0.15  # 序列相关系数
+    # A股特性：散户主导，追涨杀跌强，序列相关更高
+    rho = 0.28  # 序列相关系数（强动量，模拟A股跟风特性）
     for i in range(1, n):
         momentum[i] = rho * momentum[i - 1] + np.sqrt(1 - rho ** 2) * z[i]
 
