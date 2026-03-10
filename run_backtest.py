@@ -20,6 +20,7 @@ from strategies.ml_filter import MLSignalFilter, build_features, build_labels
 from backtest.engine import BacktestEngine
 from backtest.metrics import compute_metrics, print_metrics_report
 from backtest.visualizer import plot_backtest_results
+from selector.stock_screener import load_universe
 
 
 def run_full_backtest():
@@ -30,9 +31,19 @@ def run_full_backtest():
     # ── 1. 加载数据（优先真实缓存，fallback仿真）──
     start = DATA_CONFIG["start_date"]
     end   = DATA_CONFIG["end_date"]
+
+    # 优先从宇宙文件加载全量股票，fallback到config小池
+    universe = load_universe()
+    if universe:
+        stock_codes = [s["code"] for s in universe]
+        logger.info(f"从宇宙文件加载 {len(stock_codes)} 只股票")
+    else:
+        stock_codes = DATA_CONFIG["stock_pool"]
+        logger.info(f"宇宙文件不存在，使用 config 小池（{len(stock_codes)} 只）")
+
     real_count = 0
     stock_data = {}
-    for i, code in enumerate(DATA_CONFIG["stock_pool"]):
+    for i, code in enumerate(stock_codes):
         df = load_cache(code, start, end)
         if not df.empty and len(df) >= 60:
             stock_data[code] = df
@@ -131,7 +142,7 @@ def run_full_backtest():
 
     overall_wins = 0
     overall_trades = 0
-    for code in DATA_CONFIG["stock_pool"]:
+    for code in stock_codes:
         if code not in signals_dict:
             continue
         sub, sub_eq = bt_engine.run_single(signals_dict[code], code)
