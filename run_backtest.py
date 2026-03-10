@@ -10,7 +10,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("backtest")
 
 import sys
+import json
+import os
+import shutil
 import argparse
+from datetime import datetime
 import numpy as np
 import pandas as pd
 
@@ -24,7 +28,58 @@ from backtest.visualizer import plot_backtest_results
 from selector.stock_screener import load_universe, filter_by_theme, apply_basic_filters
 
 
+def _save_backtest_run(
+    run_dir: str,
+    metrics_tech: dict,
+    metrics_ml: dict,
+    trade_df_tech: pd.DataFrame,
+    trade_df_ml: pd.DataFrame,
+    equity_tech: pd.Series,
+    equity_ml: pd.Series,
+    per_stock_rows: list,
+    config_snapshot: dict,
+) -> None:
+    """将单次回测的所有结果持久化到 run_dir"""
+    os.makedirs(run_dir, exist_ok=True)
+
+    # metrics JSON（浮点/NaN 做 default=str 兜底）
+    with open(f"{run_dir}/metrics.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {"tech_strategy": metrics_tech, "ml_strategy": metrics_ml},
+            f, ensure_ascii=False, indent=2, default=str,
+        )
+
+    # 交易明细 CSV
+    if not trade_df_tech.empty:
+        trade_df_tech.to_csv(f"{run_dir}/trades_tech.csv", index=False, encoding="utf-8-sig")
+    if not trade_df_ml.empty and not trade_df_ml.equals(trade_df_tech):
+        trade_df_ml.to_csv(f"{run_dir}/trades_ml.csv", index=False, encoding="utf-8-sig")
+
+    # 资金曲线 CSV
+    equity_tech.to_csv(f"{run_dir}/equity_tech.csv", header=["equity"])
+    if not equity_ml.equals(equity_tech):
+        equity_ml.to_csv(f"{run_dir}/equity_ml.csv", header=["equity"])
+
+    # 各股票胜率汇总
+    if per_stock_rows:
+        pd.DataFrame(per_stock_rows).to_csv(
+            f"{run_dir}/per_stock.csv", index=False, encoding="utf-8-sig"
+        )
+
+    # 本次回测配置快照
+    with open(f"{run_dir}/config.json", "w", encoding="utf-8") as f:
+        json.dump(config_snapshot, f, ensure_ascii=False, indent=2, default=str)
+
+    # 图表复制进来（已生成则复制，否则跳过）
+    for png in ["reports/tech_strategy_report.png", "reports/ml_enhanced_report.png"]:
+        if os.path.exists(png):
+            shutil.copy(png, run_dir)
+
+
 def run_full_backtest(sectors: list = None):
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("reports", "runs", run_ts)
+
     initial_capital = BACKTEST_CONFIG["initial_capital"]
     bt_engine = BacktestEngine(BACKTEST_CONFIG, STRATEGY_CONFIG)
     strategy = MultiFactorStrategy(STRATEGY_CONFIG)
@@ -152,6 +207,7 @@ def run_full_backtest(sectors: list = None):
 
     overall_wins = 0
     overall_trades = 0
+    per_stock_rows = []
     for code in stock_codes:
         if code not in signals_dict:
             continue
@@ -166,6 +222,13 @@ def run_full_backtest(sectors: list = None):
         wr = wins / total * 100
         avg_ret = sub_df["pnl_pct"].mean() * 100
         total_pnl = sub_df["pnl"].sum()
+        per_stock_rows.append({
+            "stock_code": code,
+            "trades": total,
+            "win_rate_pct": round(wr, 2),
+            "avg_return_pct": round(avg_ret, 2),
+            "total_pnl": round(total_pnl, 2),
+        })
         flag = "✅" if wr >= 80 else ("⚠️" if wr >= 65 else "❌")
         print(f"  {code:<10} {total:>8}    {wr:>6.1f}%  {avg_ret:>+9.2f}%  ¥{total_pnl:>11,.0f}  {flag}")
 
@@ -245,6 +308,29 @@ def run_full_backtest(sectors: list = None):
     print(f"\n  综合评级: {grade}（{passed_cnt}/5 项达标）")
     print("=" * 65)
     print("\n✅ 回测完成！报告保存在 reports/ 目录")
+
+    # ── 12. 持久化本次回测数据 ──
+    config_snapshot = {
+        "run_time": run_ts,
+        "sectors": sectors,
+        "backtest": BACKTEST_CONFIG,
+        "strategy": STRATEGY_CONFIG,
+        "account": ACCOUNT_CONFIG,
+        "data": {k: v for k, v in DATA_CONFIG.items() if k != "stock_pool"},
+    }
+    _save_backtest_run(
+        run_dir=run_dir,
+        metrics_tech=metrics_tech,
+        metrics_ml=metrics_ml,
+        trade_df_tech=trade_df_tech,
+        trade_df_ml=trade_df_ml,
+        equity_tech=equity_tech,
+        equity_ml=equity_ml,
+        per_stock_rows=per_stock_rows,
+        config_snapshot=config_snapshot,
+    )
+    logger.info(f"回测数据已保存 → {run_dir}/")
+    print(f"  metrics.json / trades_tech.csv / equity_tech.csv / per_stock.csv / config.json")
 
     return metrics_tech, overall_wr
 
