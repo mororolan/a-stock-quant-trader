@@ -41,7 +41,7 @@ logger = logging.getLogger("scanner")
 from config import SECTOR_STOCK_POOL, STRATEGY_CONFIG, ACCOUNT_CONFIG
 from strategies.multi_factor import MultiFactorStrategy
 from strategies.indicators import compute_all_indicators
-from data.fetcher import generate_synthetic_data
+from data.fetcher import generate_synthetic_data, load_cache
 
 
 # ────────────── 数据加载 ──────────────
@@ -66,19 +66,28 @@ def load_or_simulate(
     end_date: str,
     warmup_days: int = 280,
 ) -> pd.DataFrame:
-    """加载真实数据 或 使用仿真数据（fallback）"""
+    """
+    数据加载优先级：
+      1. data/cache/{code}.parquet  — baostock 下载的真实数据
+      2. data_dir 指定的外部 CSV/Parquet
+      3. 仿真数据兜底
+    """
     warmup_start = (pd.Timestamp(start_date) - pd.offsets.BDay(warmup_days)).strftime("%Y-%m-%d")
 
-    # 优先用真实数据
+    # 1. 优先读 data/cache（baostock 缓存）
+    df = load_cache(stock_code, warmup_start, end_date)
+    if not df.empty:
+        return df
+
+    # 2. 再试 data_dir 指定目录
     if data_dir:
         df = load_stock_data_csv(stock_code, data_dir)
         if not df.empty:
-            return df.loc[warmup_start:end_date] if not df.empty else df
+            return df.loc[warmup_start:end_date]
 
-    # Fallback: 仿真数据
+    # 3. 仿真兜底
     seed = 42 + sum(ord(c) for c in stock_code) % 997
-    df = generate_synthetic_data(stock_code, warmup_start, end_date, seed=seed)
-    return df
+    return generate_synthetic_data(stock_code, warmup_start, end_date, seed=seed)
 
 
 # ────────────── 信号分析 ──────────────

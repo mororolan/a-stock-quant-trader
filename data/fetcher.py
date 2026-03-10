@@ -1,6 +1,10 @@
 """
-A股数据获取模块 - 使用 akshare 获取历史行情数据
-支持本地缓存，避免重复请求
+A股数据获取模块
+
+优先级：
+  1. 本地缓存（data/cache/{code}.parquet）— 由 download_baostock.py 生成
+  2. akshare 在线拉取（有网络时）
+  3. 仿真数据兜底（无网络 / 无缓存）
 """
 
 import os
@@ -13,8 +17,39 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _cache_path(stock_code: str, cache_dir: str) -> Path:
-    return Path(cache_dir) / f"{stock_code}.parquet"
+CACHE_DIR = Path(__file__).resolve().parent / "cache"
+
+
+def _cache_path(stock_code: str, cache_dir: str = None) -> Path:
+    base = Path(cache_dir) if cache_dir else CACHE_DIR
+    return base / f"{stock_code}.parquet"
+
+
+def load_cache(
+    stock_code: str,
+    start_date: str = None,
+    end_date: str = None,
+    cache_dir: str = None,
+) -> pd.DataFrame:
+    """
+    从本地缓存读取行情数据（由 data/download_baostock.py 下载生成）。
+    找不到缓存时返回空 DataFrame。
+    """
+    p = _cache_path(stock_code, cache_dir)
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_parquet(p)
+        if df.empty:
+            return df
+        if start_date:
+            df = df.loc[start_date:]
+        if end_date:
+            df = df.loc[:end_date]
+        return df
+    except Exception as e:
+        logger.warning(f"[{stock_code}] 读取缓存失败: {e}")
+        return pd.DataFrame()
 
 
 def fetch_stock_data(

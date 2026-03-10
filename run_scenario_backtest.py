@@ -19,6 +19,7 @@ from config import DATA_CONFIG, STRATEGY_CONFIG, BACKTEST_CONFIG
 from strategies.multi_factor import MultiFactorStrategy
 from backtest.engine import BacktestEngine
 from backtest.metrics import compute_metrics, print_metrics_report
+from data.fetcher import load_cache
 
 
 def generate_scenario_data(
@@ -148,11 +149,20 @@ def run_scenario(scenario_name: str, start: str, end: str, scenario_key: str) ->
     # 预热期：往前延伸 280 个交易日（含52周高低点等指标），确保所有指标无NaN
     warmup_start = (pd.Timestamp(start) - pd.offsets.BDay(280)).strftime("%Y-%m-%d")
 
-    # 生成数据（预热 + 目标区间）
+    # 生成数据（预热 + 目标区间）：优先读真实缓存，无缓存则用仿真
     stock_data = {}
+    real_count = 0
     for i, code in enumerate(stock_pool):
-        df = generate_scenario_data(code, warmup_start, end, scenario=scenario_key, seed=42 + i * 7)
-        stock_data[code] = df
+        real = load_cache(code, warmup_start, end)
+        if not real.empty and len(real) >= 280:
+            stock_data[code] = real
+            real_count += 1
+        else:
+            stock_data[code] = generate_scenario_data(
+                code, warmup_start, end, scenario=scenario_key, seed=42 + i * 7
+            )
+    if real_count > 0:
+        logger.info(f"  真实数据：{real_count} 只，仿真数据：{len(stock_pool)-real_count} 只")
 
     # 生成信号（全区间计算指标）
     signals_dict_full = {}

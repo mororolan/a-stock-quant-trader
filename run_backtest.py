@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from config import DATA_CONFIG, STRATEGY_CONFIG, BACKTEST_CONFIG, ML_CONFIG
-from data.fetcher import generate_synthetic_data
+from data.fetcher import generate_synthetic_data, load_cache
 from strategies.multi_factor import MultiFactorStrategy
 from strategies.ml_filter import MLSignalFilter, build_features, build_labels
 from backtest.engine import BacktestEngine
@@ -27,14 +27,20 @@ def run_full_backtest():
     bt_engine = BacktestEngine(BACKTEST_CONFIG, STRATEGY_CONFIG)
     strategy = MultiFactorStrategy(STRATEGY_CONFIG)
 
-    # ── 1. 生成仿真数据 ──
-    logger.info("生成仿真A股数据（20只股票，2020-2024年）...")
+    # ── 1. 加载数据（优先真实缓存，fallback仿真）──
+    start = DATA_CONFIG["start_date"]
+    end   = DATA_CONFIG["end_date"]
+    real_count = 0
     stock_data = {}
     for i, code in enumerate(DATA_CONFIG["stock_pool"]):
-        stock_data[code] = generate_synthetic_data(
-            code, DATA_CONFIG["start_date"], DATA_CONFIG["end_date"], seed=42 + i * 7
-        )
-    logger.info(f"数据准备完成：{len(stock_data)} 只股票，每只约 {len(list(stock_data.values())[0])} 个交易日")
+        df = load_cache(code, start, end)
+        if not df.empty and len(df) >= 60:
+            stock_data[code] = df
+            real_count += 1
+        else:
+            stock_data[code] = generate_synthetic_data(code, start, end, seed=42 + i * 7)
+    src = f"（{real_count}只真实数据 + {len(stock_data)-real_count}只仿真数据）" if real_count else "（仿真数据）"
+    logger.info(f"数据准备完成：{len(stock_data)} 只股票，每只约 {len(list(stock_data.values())[0])} 个交易日 {src}")
 
     # ── 2. 技术面信号生成 ──
     logger.info("计算多因子技术信号...")
