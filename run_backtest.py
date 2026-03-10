@@ -10,20 +10,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("backtest")
 
 import sys
+import argparse
 import numpy as np
 import pandas as pd
 
-from config import DATA_CONFIG, STRATEGY_CONFIG, BACKTEST_CONFIG, ML_CONFIG
+from config import DATA_CONFIG, STRATEGY_CONFIG, BACKTEST_CONFIG, ML_CONFIG, ACCOUNT_CONFIG
 from data.fetcher import generate_synthetic_data, load_cache
 from strategies.multi_factor import MultiFactorStrategy
 from strategies.ml_filter import MLSignalFilter, build_features, build_labels
 from backtest.engine import BacktestEngine
 from backtest.metrics import compute_metrics, print_metrics_report
 from backtest.visualizer import plot_backtest_results
-from selector.stock_screener import load_universe
+from selector.stock_screener import load_universe, filter_by_theme, apply_basic_filters
 
 
-def run_full_backtest():
+def run_full_backtest(sectors: list = None):
     initial_capital = BACKTEST_CONFIG["initial_capital"]
     bt_engine = BacktestEngine(BACKTEST_CONFIG, STRATEGY_CONFIG)
     strategy = MultiFactorStrategy(STRATEGY_CONFIG)
@@ -32,11 +33,20 @@ def run_full_backtest():
     start = DATA_CONFIG["start_date"]
     end   = DATA_CONFIG["end_date"]
 
-    # 优先从宇宙文件加载全量股票，fallback到config小池
+    # 动态选股：主题过滤 → 基础过滤（tier/板块），与 run_daily_scanner 逻辑一致
     universe = load_universe()
     if universe:
-        stock_codes = [s["code"] for s in universe]
-        logger.info(f"从宇宙文件加载 {len(stock_codes)} 只股票")
+        # 主题过滤（--sectors 指定时生效，否则全市场）
+        candidates = filter_by_theme(universe, sectors) if sectors else universe
+        # 基础过滤：排除创业板/科创板，排除小盘(tier>max_tier)
+        candidates = apply_basic_filters(
+            candidates,
+            exclude_boards=ACCOUNT_CONFIG.get("exclude_boards", ["300", "688"]),
+            max_tier=ACCOUNT_CONFIG.get("max_tier", 2),
+        )
+        stock_codes = [s["code"] for s in candidates]
+        sector_desc = f"主题={sectors}" if sectors else "全市场"
+        logger.info(f"动态选股（{sector_desc}）→ {len(stock_codes)} 只候选（tier≤{ACCOUNT_CONFIG.get('max_tier',2)}/主板）")
     else:
         stock_codes = DATA_CONFIG["stock_pool"]
         logger.info(f"宇宙文件不存在，使用 config 小池（{len(stock_codes)} 只）")
@@ -240,4 +250,11 @@ def run_full_backtest():
 
 
 if __name__ == "__main__":
-    run_full_backtest()
+    parser = argparse.ArgumentParser(description="A股多因子策略回测")
+    parser.add_argument(
+        "--sectors", nargs="+", default=None,
+        help="回测范围限定到指定板块/主题（空格分隔），不指定则全市场。"
+             "示例：--sectors AI与科技 金融 消费白酒"
+    )
+    args = parser.parse_args()
+    run_full_backtest(sectors=args.sectors)
